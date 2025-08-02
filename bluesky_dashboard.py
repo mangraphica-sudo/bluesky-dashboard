@@ -303,7 +303,7 @@ if st.sidebar.button("Fetch Latest Data"):
                     del st.session_state['unfollower_df']
                 # Display success message
                 st.success("Data fetched successfully. Scroll up to see updated charts.")
-                st.experimental_rerun()
+                st.rerun()
             except Exception as e:
                 st.error(f"Failed to fetch data: {e}")
     else:
