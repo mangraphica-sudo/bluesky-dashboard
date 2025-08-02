@@ -278,6 +278,8 @@ if st.sidebar.button("Fetch Latest Data"):
                 headers = {"Authorization": f"Bearer {jwt}"}
                 followers_list = fetch_followers_api(actor_did, headers)
                 posts_df = fetch_posts_api(actor_did, headers)
+                # Convert posts_df date column to datetime
+                posts_df['date'] = pd.to_datetime(posts_df['date'])
                 # Compute follower gains/losses relative to previous fetch stored in session state
                 prev_followers = st.session_state.get("_prev_followers", [])
                 gained = len(set(followers_list) - set(prev_followers))
@@ -291,6 +293,8 @@ if st.sidebar.button("Fetch Latest Data"):
                     "gained": [gained],
                     "lost": [lost]
                 })
+                # Ensure followers_df date column is datetime
+                followers_df['date'] = pd.to_datetime(followers_df['date'])
                 st.session_state['followers_df'] = followers_df
                 # Store engagement DataFrame in session state
                 st.session_state['engagement_df'] = posts_df
@@ -299,6 +303,7 @@ if st.sidebar.button("Fetch Latest Data"):
                     del st.session_state['unfollower_df']
                 # Display success message
                 st.success("Data fetched successfully. Scroll up to see updated charts.")
+                st.experimental_rerun()
             except Exception as e:
                 st.error(f"Failed to fetch data: {e}")
     else:
