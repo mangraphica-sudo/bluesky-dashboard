@@ -215,7 +215,7 @@ def fetch_followers_api(did: str, headers: dict) -> list:
     followers = []
     cursor = None
     while True:
-        params = {"actor": did, "limit": 1000}
+        params = {"actor": did, "limit": 100}
         if cursor:
             params["cursor"] = cursor
         url = "https://bsky.social/xrpc/app.bsky.graph.getFollowers"
