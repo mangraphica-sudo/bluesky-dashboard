@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
 import holidays
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import TruncatedSVD
@@ -24,11 +25,24 @@ unfollower_csv = st.sidebar.file_uploader("Upload Unfollower Log CSV", type="csv
 def load_data(file):
     return pd.read_csv(file, parse_dates=True)
 
-if follower_csv and engagement_csv:
-    followers_df = load_data(follower_csv)
-    engagement_df = load_data(engagement_csv)
-    if unfollower_csv:
-        unfollower_df = load_data(unfollower_csv)
+# Determine data source: CSV uploads or API fetch stored in session state
+if (follower_csv and engagement_csv) or (
+    'followers_df' in st.session_state and 'engagement_df' in st.session_state
+):
+    if follower_csv and engagement_csv:
+        followers_df = load_data(follower_csv)
+        engagement_df = load_data(engagement_csv)
+        # Persist uploaded data to session state so it can be reused
+        st.session_state['followers_df'] = followers_df
+        st.session_state['engagement_df'] = engagement_df
+        if unfollower_csv:
+            unfollower_df = load_data(unfollower_csv)
+            st.session_state['unfollower_df'] = unfollower_df
+    else:
+        # Load data from session state (populated by API fetch)
+        followers_df = st.session_state['followers_df']
+        engagement_df = st.session_state['engagement_df']
+        unfollower_df = st.session_state.get('unfollower_df')
 
     # --- Global Date Filter ---
     st.sidebar.header("📆 Date Range Filter")
@@ -57,7 +71,7 @@ if follower_csv and engagement_csv:
     st.line_chart(daily_stats)
 
     # --- Engagement Over Time ---
-    st.subheader("💬 Post Engagement Over Time")
+    st.subheader("🗯 Post Engagement Over Time")
     engagement_summary = engagement_df.groupby('date').agg({'likes': 'sum', 'reposts': 'sum', 'replies': 'sum'})
     if show_outliers:
         engagement_summary = engagement_summary[(engagement_summary < engagement_summary.quantile(0.95))]
@@ -69,7 +83,7 @@ if follower_csv and engagement_csv:
         st.line_chart(engagement_summary[[metric]])
 
     # --- Hashtag Effectiveness ---
-    st.subheader("🏷️ Top Hashtag Performance")
+    st.subheader("🎒 Top Hashtag Performance")
     hashtag_summary = engagement_df.copy()
     hashtag_summary['hashtags'] = hashtag_summary['hashtags'].fillna('').apply(lambda x: x.split(';'))
     hashtag_summary = hashtag_summary.explode('hashtags')
@@ -103,7 +117,7 @@ if follower_csv and engagement_csv:
         st.info("Not enough hashtag data to perform clustering.")
 
     # --- Feed / Starter Pack Performance ---
-    st.subheader("🧭 Feed and Starter Pack Comparison")
+    st.subheader("🗝 Feed and Starter Pack Comparison")
     if 'feed' in engagement_df.columns:
         feed_summary = engagement_df.groupby('feed').agg({
             'likes': 'mean',
@@ -113,13 +127,13 @@ if follower_csv and engagement_csv:
         st.bar_chart(feed_summary)
 
     # --- Starter Pack Generator ---
-    st.subheader("🧠 Starter Pack Generator")
+    st.subheader("🧐 Starter Pack Generator")
     suggested_pack = top_hashtags[:5]
     st.markdown("**Starter Pack (Top 5 Tags):**")
     st.code(" ".join([f"#{tag}" for tag in suggested_pack]))
 
     # --- Engagement Timing Heatmap ---
-    st.subheader("🕒 Engagement Timing Heatmap")
+    st.subheader("🕔 Engagement Timing Heatmap")
     engagement_df['datetime'] = pd.to_datetime(engagement_df['date']) + pd.to_timedelta(time_zone_adjustment, unit='h')
     engagement_df['hour'] = engagement_df['datetime'].dt.hour
     engagement_df['day_of_week'] = engagement_df['datetime'].dt.day_name()
@@ -168,11 +182,124 @@ if follower_csv and engagement_csv:
             "text/csv"
         )
 else:
-    st.info("Please upload both a Follower CSV and an Engagement CSV to begin.")
+    st.info(
+        "Please upload both a Follower CSV and an Engagement CSV, or use the API fetch above to load data."
+    )
+
+# ------------------------ API INTEGRATION ------------------------
+
+# Helper functions for Bluesky API
+def resolve_handle_api(handle: str) -> str:
+    """Resolve a handle to its DID using the ATProto identity API."""
+    url = "https://bsky.social/xrpc/com.atproto.identity.resolveHandle"
+    resp = requests.get(url, params={"handle": handle}, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("did")
+
+
+def create_session_api(identifier: str, password: str) -> str:
+    """Create a session and return the access JWT."""
+    url = "https://bsky.social/xrpc/com.atproto.server.createSession"
+    resp = requests.post(url, json={"identifier": identifier, "password": password}, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("accessJwt")
+
+
+def fetch_followers_api(did: str, headers: dict) -> list:
+    followers = []
+    cursor = None
+    while True:
+        params = {"actor": did, "limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+        url = "https://bsky.social/xrpc/app.bsky.graph.getFollowers"
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        followers.extend([entry.get("did") for entry in data.get("followers", [])])
+        cursor = data.get("cursor")
+        if not cursor:
+            break
+    return followers
+
+
+def fetch_posts_api(did: str, headers: dict) -> pd.DataFrame:
+    """Fetch posts for the given actor and return a DataFrame."""
+    rows = []
+    cursor = None
+    while True:
+        params = {"actor": did, "limit": 100}
+        if cursor:
+            params["cursor"] = cursor
+        url = "https://bsky.social/xrpc/app.bsky.feed.getAuthorFeed"
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        resp.raise_for_status()
+        feed_data = resp.json()
+        for item in feed_data.get("feed", []):
+            post = item.get("post", {})
+            record = post.get("record", {})
+            created_at = record.get("createdAt") or record.get("timestamp")
+            if not created_at:
+                continue
+            date = created_at[:10]
+            likes = post.get("likeCount", 0)
+            reposts = post.get("repostCount", 0)
+            replies = post.get("replyCount", 0)
+            text = record.get("text", "")
+            hashtags = [t for t in text.split() if t.startswith("#")]
+            hashtag_str = ";".join(hashtags)
+            rows.append((date, likes, reposts, replies, hashtag_str))
+        cursor = feed_data.get("cursor")
+        if not cursor:
+            break
+    df = pd.DataFrame(rows, columns=["date", "likes", "reposts", "replies", "hashtags"])
+    return df
+
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔗 Fetch Live Data from Bluesky")
+bs_handle = st.sidebar.text_input("Bluesky handle (e.g. yourname.bsky.social)")
+bs_password = st.sidebar.text_input("App password", type="password")
+if st.sidebar.button("Fetch Latest Data"):
+    if bs_handle and bs_password:
+        with st.spinner("Connecting to Bluesky API…"):
+            try:
+                did = resolve_handle_api(bs_handle)
+                jwt = create_session_api(bs_handle, bs_password)
+                headers = {"Authorization": f"Bearer {jwt}"}
+                followers_list = fetch_followers_api(did, headers)
+                posts_df = fetch_posts_api(did, headers)
+                # Compute follower gains/losses relative to previous fetch stored in session state
+                prev_followers = st.session_state.get("_prev_followers", [])
+                gained = len(set(followers_list) - set(prev_followers))
+                lost = len(set(prev_followers) - set(followers_list))
+                today = pd.Timestamp.today().normalize()
+                # Save for next time
+                st.session_state["_prev_followers"] = followers_list
+                # Create follower DataFrame and store in session state
+                followers_df = pd.DataFrame({
+                    "date": [today],
+                    "gained": [gained],
+                    "lost": [lost]
+                })
+                st.session_state['followers_df'] = followers_df
+                # Store engagement DataFrame in session state
+                st.session_state['engagement_df'] = posts_df
+                # Clear any existing unfollower log
+                if 'unfollower_df' in st.session_state:
+                    del st.session_state['unfollower_df']
+                # Display success message
+                st.success("Data fetched successfully. Scroll up to see updated charts.")
+            except Exception as e:
+                st.error(f"Failed to fetch data: {e}")
+    else:
+        st.warning("Please provide both a handle and an app password.")
 
 # --- Notes on CSV Format ---
 st.sidebar.markdown("---")
-st.sidebar.subheader("📄 Expected CSV Formats")
+st.sidebar.subheader("📳 Expected CSV Formats")
 st.sidebar.markdown(
     """
 **Follower CSV**
